@@ -19,6 +19,7 @@ class AuthTokenFileTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.tmp.name, "auth-token")
+        self.ack_path = os.path.join(self.tmp.name, "weak-auth-ack")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -28,9 +29,53 @@ class AuthTokenFileTests(unittest.TestCase):
             f.write(token)
         os.chmod(self.path, mode)
 
+    def write_ack(self, text="I accept weak public authentication", mode=0o600):
+        with open(self.ack_path, "w") as f:
+            f.write(text)
+        os.chmod(self.ack_path, mode)
+
     def test_loads_secure_token_once(self):
         self.write_token("strong-token-" + "x" * 32)
         self.assertEqual(server.load_auth_token(self.path), b"strong-token-" + b"x" * 32)
+
+    def test_weak_token_requires_valid_acknowledgement(self):
+        self.write_token("12345678")
+        self.assertEqual(server.auth_token_min_chars(None), 32)
+        with self.assertRaisesRegex(ValueError, "at least 32"):
+            server.load_auth_token(self.path)
+        self.write_ack()
+        min_chars = server.auth_token_min_chars(self.ack_path)
+        self.assertEqual(min_chars, 8)
+        self.assertEqual(server.load_auth_token(self.path, min_chars=min_chars), b"12345678")
+
+    def test_missing_or_wrong_acknowledgement_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "cannot open"):
+            server.auth_token_min_chars(self.ack_path)
+
+        for text in (
+            "I understand",
+            "I accept weak public authentication\n",
+            " I accept weak public authentication",
+            "I accept weak public authentication\0",
+        ):
+            with self.subTest(text=text):
+                self.write_ack(text)
+                with self.assertRaisesRegex(ValueError, "must contain exactly"):
+                    server.auth_token_min_chars(self.ack_path)
+
+    def test_symlink_acknowledgement_is_rejected(self):
+        target = os.path.join(self.tmp.name, "ack-target")
+        with open(target, "w") as f:
+            f.write("I accept weak public authentication")
+        os.chmod(target, 0o600)
+        os.symlink(target, self.ack_path)
+        with self.assertRaisesRegex(ValueError, "cannot open"):
+            server.auth_token_min_chars(self.ack_path)
+
+    def test_overexposed_acknowledgement_is_rejected(self):
+        self.write_ack(mode=0o640)
+        with self.assertRaisesRegex(ValueError, "mode 0600"):
+            server.auth_token_min_chars(self.ack_path)
 
     def test_rejects_short_or_overexposed_token_files(self):
         self.write_token("short")
@@ -47,14 +92,22 @@ class AuthTokenFileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "regular file"):
             server.load_auth_token(self.path)
 
+    def test_auth_user_validation_accepts_default_and_rejects_unsafe_values(self):
+        self.assertEqual(server.validate_auth_user(server.slurm.USER), server.slurm.USER.encode())
+        for value in ("", "space user", "user@example.com", "x" * 65):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                server.validate_auth_user(value)
+
 
 class AuthServerTests(unittest.TestCase):
     token = "correct-" + "z" * 32
+    auth_user = "gpu.operator"
 
     @classmethod
     def setUpClass(cls):
         cls.httpd = server.GpuvizHTTPServer(("127.0.0.1", 0), server.Handler)
         cls.httpd.auth_token = cls.token.encode()
+        cls.httpd.auth_user = cls.auth_user.encode()
         cls.port = cls.httpd.server_address[1]
         cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
         cls.thread.start()
@@ -66,7 +119,8 @@ class AuthServerTests(unittest.TestCase):
         cls.thread.join(timeout=2)
 
     @classmethod
-    def authorization(cls, username="gpuviz", token=None):
+    def authorization(cls, username=None, token=None):
+        username = cls.auth_user if username is None else username
         credential = f"{username}:{token if token is not None else cls.token}".encode()
         return "Basic " + base64.b64encode(credential).decode()
 
@@ -105,6 +159,7 @@ class AuthServerTests(unittest.TestCase):
     def test_wrong_username_token_and_malformed_header_are_rejected(self):
         headers = (
             {"Authorization": self.authorization(username="admin")},
+            {"Authorization": self.authorization(username="gpuviz")},
             {"Authorization": self.authorization(token="wrong-" + "x" * 32)},
             {"Authorization": "Basic not-base64!"},
         )
@@ -155,7 +210,7 @@ class AuthServerTests(unittest.TestCase):
             status, _, _ = self.request("DELETE", "/api/monitors/run%3A42", headers=headers)
         self.assertEqual(status, 200)
         event = json.loads(audit.call_args.args[0])
-        self.assertEqual(event["actor"], "basic:gpuviz")
+        self.assertEqual(event["actor"], "basic:gpu.operator")
 
     def test_valid_credentials_allow_static_api_and_mutation_routes(self):
         auth = {"Authorization": self.authorization()}

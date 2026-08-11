@@ -42,40 +42,63 @@ import transfer
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.realpath(os.path.join(HERE, "static"))
 MAX_BODY_BYTES = 1024 * 1024
-AUTH_USER = b"gpuviz"
 AUTH_MIN_TOKEN_CHARS = 32
+AUTH_WEAK_MIN_TOKEN_CHARS = 8
+AUTH_USER_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+WEAK_AUTH_ACK_TEXT = b"I accept weak public authentication"
 
 
-def load_auth_token(path: str) -> bytes:
-    """Load a private Basic-auth token without following symlinks."""
+def validate_auth_user(username: str) -> bytes:
+    if not AUTH_USER_RE.fullmatch(username or ""):
+        raise ValueError("auth user must be 1-64 characters from A-Z, a-z, 0-9, ., _, or -")
+    return username.encode("ascii")
+
+
+def _read_private_file(path: str, label: str) -> bytes:
     path = os.path.abspath(os.path.expanduser(path))
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+             getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     try:
         fd = os.open(path, flags)
     except OSError as e:
-        raise ValueError(f"cannot open auth token file {path}: {e.strerror or e}") from e
+        raise ValueError(f"cannot open {label} file {path}: {e.strerror or e}") from e
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
-            raise ValueError("auth token file must be a regular file")
+            raise ValueError(f"{label} file must be a regular file")
         if info.st_uid != os.getuid():
-            raise ValueError("auth token file must be owned by the current user")
+            raise ValueError(f"{label} file must be owned by the current user")
         mode = stat.S_IMODE(info.st_mode)
         if mode != 0o600:
-            raise ValueError("auth token file must have mode 0600")
+            raise ValueError(f"{label} file must have mode 0600")
         with os.fdopen(fd, "rb") as f:
             fd = -1
-            raw = f.read()
+            return f.read()
     finally:
         if fd >= 0:
             os.close(fd)
-    token = raw.strip()
+
+
+def auth_token_min_chars(weak_ack_path: str | None) -> int:
+    if not weak_ack_path:
+        return AUTH_MIN_TOKEN_CHARS
+    acknowledgement = _read_private_file(weak_ack_path, "weak-auth acknowledgement")
+    if acknowledgement != WEAK_AUTH_ACK_TEXT:
+        raise ValueError(
+            f"weak-auth acknowledgement must contain exactly: {WEAK_AUTH_ACK_TEXT.decode()}"
+        )
+    return AUTH_WEAK_MIN_TOKEN_CHARS
+
+
+def load_auth_token(path: str, min_chars: int = AUTH_MIN_TOKEN_CHARS) -> bytes:
+    """Load a private Basic-auth token without following symlinks."""
+    token = _read_private_file(path, "auth token").strip()
     try:
         token_text = token.decode("utf-8")
     except UnicodeDecodeError as e:
         raise ValueError("auth token file must contain UTF-8 text") from e
-    if len(token_text) < AUTH_MIN_TOKEN_CHARS:
-        raise ValueError(f"auth token must contain at least {AUTH_MIN_TOKEN_CHARS} characters")
+    if len(token_text) < min_chars:
+        raise ValueError(f"auth token must contain at least {min_chars} characters")
     return token
 
 
@@ -88,12 +111,14 @@ class RequestError(Exception):
 class GpuvizHTTPServer(ThreadingHTTPServer):
     request_queue_size = 64
     auth_token: bytes | None = None
+    auth_user: bytes = slurm.USER.encode("utf-8")
 
 
 class GpuvizUnixHTTPServer(ThreadingMixIn, UnixStreamServer):
     daemon_threads = True
     request_queue_size = 64
     auth_token: bytes | None = None
+    auth_user: bytes = slurm.USER.encode("utf-8")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -218,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
             supplied_user, separator, supplied_token = decoded.partition(b":")
         else:
             separator = b""
-        user_matches = hmac.compare_digest(supplied_user, AUTH_USER)
+        user_matches = hmac.compare_digest(supplied_user, self.server.auth_user)
         token_matches = hmac.compare_digest(supplied_token, expected)
         if separator and user_matches and token_matches:
             return True
@@ -268,7 +293,8 @@ class Handler(BaseHTTPRequestHandler):
         result = (self._delete(path, q or {}) if self.command == "DELETE"
                   else self._post(path, self._body()))
         if path not in ("/api/preview", "/api/monitors") and not path.endswith("/preview"):
-            actor = ("basic:gpuviz" if self.server.auth_token is not None else
+            actor = (f"basic:{self.server.auth_user.decode('ascii')}"
+                     if self.server.auth_token is not None else
                      (self.headers.get("Cf-Access-Authenticated-User-Email") or "local")[:200])
             print(json.dumps({"event": "mutation", "actor": actor,
                               "method": self.command, "path": path}), flush=True)
@@ -627,6 +653,15 @@ def main():
         "--auth-token-file",
         help="enable HTTP Basic auth with a current-user-owned mode-0600 token file",
     )
+    ap.add_argument(
+        "--auth-user",
+        default=slurm.USER,
+        help="Basic-auth username (default: current Slurm/OS username)",
+    )
+    ap.add_argument(
+        "--weak-auth-ack-file",
+        help="private acknowledgement file required before allowing an 8-character auth token",
+    )
     listen = ap.add_mutually_exclusive_group(required=True)
     listen.add_argument(
         "--host",
@@ -635,7 +670,10 @@ def main():
     listen.add_argument("--socket", help="serve on a mode-0600 Unix socket (recommended)")
     args = ap.parse_args()
     try:
-        auth_token = load_auth_token(args.auth_token_file) if args.auth_token_file else None
+        auth_user = validate_auth_user(args.auth_user)
+        min_chars = auth_token_min_chars(args.weak_auth_ack_file)
+        auth_token = (load_auth_token(args.auth_token_file, min_chars=min_chars)
+                      if args.auth_token_file else None)
     except ValueError as e:
         ap.error(str(e))
     socket_path = None
@@ -664,6 +702,7 @@ def main():
     else:
         httpd = GpuvizHTTPServer((args.host, args.port), Handler)
     httpd.auth_token = auth_token
+    httpd.auth_user = auth_user
     print(f"gpu-visualizer — user '{slurm.USER}' @ site '{slurm.current_site()}'")
     if socket_path:
         print(f"  socket: {socket_path} (mode 0600)")

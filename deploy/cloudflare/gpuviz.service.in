@@ -7,7 +7,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory=@@REPO_DIR@@
-ExecStart=@@PYTHON@@ @@REPO_DIR@@/server.py @@LISTEN_ARGS@@ --auth-token-file=@@AUTH_TOKEN_FILE@@
+ExecStart=@@PYTHON@@ @@REPO_DIR@@/server.py @@LISTEN_ARGS@@ --auth-user=@@AUTH_USER@@ --auth-token-file=@@AUTH_TOKEN_FILE@@ @@WEAK_AUTH_ACK_ARG@@
 Restart=always
 RestartSec=5s
 TimeoutStopSec=20s

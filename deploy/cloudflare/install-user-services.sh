@@ -16,7 +16,9 @@ fi
 config_root="${XDG_CONFIG_HOME:-${HOME}/.config}"
 unit_dir="${config_root}/systemd/user"
 gpuviz_config_dir="${config_root}/gpuviz"
+auth_user_file="${gpuviz_config_dir}/local-auth.user"
 auth_token_file="${gpuviz_config_dir}/local-auth.token"
+allow_weak_file="${gpuviz_config_dir}/local-auth.allow-weak"
 named_token_file="${gpuviz_config_dir}/cloudflare-tunnel.token"
 named_unit="cloudflared-gpuviz.service"
 quick_unit="cloudflared-gpuviz-quick.service"
@@ -26,6 +28,31 @@ proxy_bin="/usr/lib/systemd/systemd-socket-proxyd"
 listen_args="--socket=%t/gpuviz/gpuviz.sock"
 
 install -d -m 0700 "${unit_dir}" "${gpuviz_config_dir}"
+if [[ -L "${auth_user_file}" ]] ||
+   [[ -e "${auth_user_file}" &&
+      ( ! -f "${auth_user_file}" || ! -O "${auth_user_file}" ) ]]; then
+  echo "Refusing unsafe app auth username path: ${auth_user_file}" >&2
+  exit 1
+fi
+if [[ ! -s "${auth_user_file}" ]]; then
+  auth_user="$(id -un)"
+  (umask 077; printf '%s\n' "${auth_user}" > "${auth_user_file}")
+  unset auth_user
+  echo "Created the private app auth username file at ${auth_user_file}."
+fi
+chmod 0600 "${auth_user_file}"
+if ! auth_user="$("${python_bin}" -c \
+  'import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+if text.endswith("\n"):
+    text = text[:-1]
+if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", text):
+    raise SystemExit(1)
+print(text, end="")' "${auth_user_file}")"; then
+  echo "App auth username must match [A-Za-z0-9._-]{1,64}: ${auth_user_file}" >&2
+  exit 1
+fi
+
 if [[ -L "${auth_token_file}" ]] ||
    [[ -e "${auth_token_file}" &&
       ( ! -f "${auth_token_file}" || ! -O "${auth_token_file}" ) ]]; then
@@ -39,10 +66,31 @@ if [[ ! -s "${auth_token_file}" ]]; then
   echo "Generated a private 256-bit app auth token at ${auth_token_file}."
 fi
 chmod 0600 "${auth_token_file}"
+
+minimum_auth_token_chars=32
+weak_auth_ack_arg=""
+if [[ -L "${allow_weak_file}" ]]; then
+  echo "Refusing unsafe weak-password opt-in path: ${allow_weak_file}" >&2
+  exit 1
+elif [[ -e "${allow_weak_file}" ]]; then
+  if [[ ! -f "${allow_weak_file}" || ! -O "${allow_weak_file}" ]] ||
+     [[ "$(stat -c '%a' "${allow_weak_file}")" != "600" ]]; then
+    echo "Weak-password opt-in must be an owned regular mode-0600 file: ${allow_weak_file}" >&2
+    exit 1
+  fi
+  if ! "${python_bin}" -c \
+    'import pathlib, sys; expected = b"I accept weak public authentication"; raise SystemExit(0 if pathlib.Path(sys.argv[1]).read_bytes() == expected else 1)' \
+    "${allow_weak_file}"; then
+    echo "Weak-password opt-in must contain exactly: I accept weak public authentication" >&2
+    exit 1
+  fi
+  minimum_auth_token_chars=8
+  weak_auth_ack_arg="--weak-auth-ack-file=${allow_weak_file}"
+fi
 if ! "${python_bin}" -c \
-  'import pathlib, sys; token = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").strip(); raise SystemExit(0 if len(token) >= 32 else 1)' \
-  "${auth_token_file}"; then
-  echo "App auth token must contain at least 32 UTF-8 characters: ${auth_token_file}" >&2
+  'import pathlib, sys; token = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").strip(); raise SystemExit(0 if len(token) >= int(sys.argv[2]) else 1)' \
+  "${auth_token_file}" "${minimum_auth_token_chars}"; then
+  echo "App auth token must contain at least ${minimum_auth_token_chars} UTF-8 characters: ${auth_token_file}" >&2
   exit 1
 fi
 
@@ -84,7 +132,9 @@ fi
 sed -e "s|@@REPO_DIR@@|${repo_dir}|g" \
     -e "s|@@PYTHON@@|${python_bin}|g" \
     -e "s|@@LISTEN_ARGS@@|${listen_args}|g" \
+    -e "s|@@AUTH_USER@@|${auth_user}|g" \
     -e "s|@@AUTH_TOKEN_FILE@@|${auth_token_file}|g" \
+    -e "s|@@WEAK_AUTH_ACK_ARG@@|${weak_auth_ack_arg}|g" \
   "${script_dir}/gpuviz.service.in" > "${unit_dir}/gpuviz.service"
 chmod 0600 "${unit_dir}/gpuviz.service"
 
@@ -97,9 +147,9 @@ import socket
 import sys
 import time
 
-transport, endpoint, token_path = sys.argv[1:]
+transport, endpoint, user, token_path = sys.argv[1:]
 token = pathlib.Path(token_path).read_text(encoding="utf-8").strip()
-credential = base64.b64encode(f"gpuviz:{token}".encode()).decode()
+credential = base64.b64encode(f"{user}:{token}".encode()).decode()
 request = ("GET /api/health HTTP/1.1\r\nHost: localhost\r\n"
            f"Authorization: Basic {credential}\r\nConnection: close\r\n\r\n").encode()
 deadline = time.monotonic() + 10
@@ -124,7 +174,7 @@ while time.monotonic() < deadline:
             client.close()
     time.sleep(0.1)
 print(f"authenticated origin health check failed: {last_error!r}", file=sys.stderr)
-raise SystemExit(1)' "${transport}" "${endpoint}" "${auth_token_file}"
+raise SystemExit(1)' "${transport}" "${endpoint}" "${auth_user}" "${auth_token_file}"
 }
 
 require_active() {
@@ -187,7 +237,7 @@ if [[ "${mode}" == "named" && "${linger}" != "yes" ]]; then
 elif [[ "${mode}" == "quick" ]]; then
   echo "Quick Tunnel URL:"
   echo "  journalctl --user -u ${quick_unit} -o cat --no-pager | grep -Eo 'https://[a-z0-9-]+\\.trycloudflare\\.com' | tail -1"
-  echo "Credentials: username gpuviz; password is in ${auth_token_file}"
+  echo "Credentials: username ${auth_user}; password is in ${auth_token_file}"
   if [[ "${linger}" != "yes" ]]; then
     echo "This temporary tunnel stops at logout and receives a new URL at the next login."
   fi

@@ -18,7 +18,7 @@ browser -> random Quick URL -> Basic auth -> loopback socket proxy -> 0600 Unix 
 
 Named Tunnels are strongly preferred. Quick Tunnels have no SLA, stable URL, or
 Cloudflare Access policy and are not a production deployment. In both modes the
-installer adds a private application password because this application can
+installer adds private application credentials because this application can
 submit, update, migrate, and cancel jobs.
 
 ## 1. Install the connector and user services
@@ -32,10 +32,13 @@ From the repository root:
 
 The connector installer pins and verifies `cloudflared` 2026.7.3. The service
 installer resolves the current repository path, prefers the system Python, and
-uses the connector installed at `~/.local/bin/cloudflared`. It creates a
-256-bit application password at
-`~/.config/gpuviz/local-auth.token` with mode `0600` and passes only its path to
-`gpuviz.service`.
+uses the connector installed at `~/.local/bin/cloudflared`. It creates the
+private username file `~/.config/gpuviz/local-auth.user`, defaulting to the
+output of `id -un`, and a 256-bit application password at
+`~/.config/gpuviz/local-auth.token`. Both files have mode `0600`; the username
+must match `[A-Za-z0-9._-]{1,64}`. The service receives the validated username
+and the password-file path. To choose a different username, replace the first
+file's contents, keep it mode `0600`, and rerun the installer.
 
 The service installer selects exactly one connector:
 
@@ -107,7 +110,8 @@ meets that requirement.
 systemctl --user --no-pager --full status gpuviz.service cloudflared-gpuviz.service
 journalctl --user -u gpuviz.service -u cloudflared-gpuviz.service --since=-10m
 runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-curl --user gpuviz --unix-socket "${runtime_dir}/gpuviz/gpuviz.sock" \
+gpuviz_user="$(<"${XDG_CONFIG_HOME:-$HOME/.config}/gpuviz/local-auth.user")"
+curl --user "${gpuviz_user}" --unix-socket "${runtime_dir}/gpuviz/gpuviz.sock" \
   http://localhost/api/health
 curl -I https://gpuviz.example.com/
 ```
@@ -118,10 +122,30 @@ command line, where other local users could briefly see it in the process list.
 
 The public request should redirect unauthenticated callers to Cloudflare Access.
 After Access authentication, the browser should show an HTTP Basic prompt. Use
-username `gpuviz` and the local auth token as the password. Then verify the
-Cluster, Projects, Jobs, Queue, Activity, and Ad-hoc views before exercising a
-write action. Start with a guarded, tiny holder job; live submit/migrate against
-real allocations is operationally sensitive.
+the username from `~/.config/gpuviz/local-auth.user` and the local auth token as the
+password. Then verify the Cluster, Projects, Jobs, Queue, Activity, and Ad-hoc
+views before exercising a write action. Start with a guarded, tiny holder job;
+live submit/migrate against real allocations is operationally sensitive.
+
+Strong passwords are the default and are strongly recommended for every public
+deployment. To use an existing password between 8 and 31 UTF-8 characters, an
+operator must explicitly create this exact, private sentinel and rerun the
+installer:
+
+```bash
+allow_weak_file="${XDG_CONFIG_HOME:-$HOME/.config}/gpuviz/local-auth.allow-weak"
+(umask 077; printf %s 'I accept weak public authentication' > "${allow_weak_file}")
+./deploy/cloudflare/install-user-services.sh
+```
+
+The installer accepts the weaker password only when that path is an owned,
+regular, mode-`0600` file whose bytes exactly equal
+`I accept weak public authentication` (with no trailing newline). A missing,
+unsafe, or malformed opt-in never lowers the 32-character minimum; unsafe and
+malformed files make installation fail closed. The service receives the
+acknowledgement-file path and independently revalidates it at startup. Remove
+the sentinel, replace the password with at least 32 characters, and rerun the
+installer to restore the recommended policy.
 
 ## Temporary no-sudo Quick Tunnel
 
@@ -131,7 +155,7 @@ domain, Access application, or sudo. `cloudflared` does not support a Quick
 Tunnel with `--unix-socket`, so a systemd socket-activation proxy connects its
 loopback-only `127.0.0.1:18770` origin to the app's mode-`0600` Unix socket.
 Other users on the login host can reach loopback, but they cannot replace the
-systemd-owned listener or reach the app without the generated 256-bit password.
+systemd-owned listener or reach the app without the configured password.
 The installer verifies authenticated health over both the Unix socket and the
 proxy before it starts cloudflared.
 
@@ -140,14 +164,15 @@ Retrieve the current random URL and credentials with:
 ```bash
 journalctl --user -u cloudflared-gpuviz-quick.service -o cat --no-pager \
   | grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -1
-printf 'username: gpuviz\npassword: '
+gpuviz_user="$(<"${XDG_CONFIG_HOME:-$HOME/.config}/gpuviz/local-auth.user")"
+printf 'username: %s\npassword: ' "${gpuviz_user}"
 cat "${XDG_CONFIG_HOME:-$HOME/.config}/gpuviz/local-auth.token"
 printf '\n'
 ```
 
-Open the URL and enter `gpuviz` plus that password in the browser's Basic-auth
-prompt. Treat both values as credentials; anyone with them can control your
-Slurm jobs.
+Open the URL and enter the configured username plus that password in the
+browser's Basic-auth prompt. Treat both values as credentials; anyone with them
+can control your Slurm jobs.
 
 Quick Tunnel limitations are intentional:
 
