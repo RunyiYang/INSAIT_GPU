@@ -20,8 +20,10 @@ _lock = threading.Lock()
 
 
 def _ensure():
-    os.makedirs(STORE_DIR, exist_ok=True)
-    os.makedirs(SBATCH_DIR, exist_ok=True)
+    os.makedirs(STORE_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(SBATCH_DIR, mode=0o700, exist_ok=True)
+    os.chmod(STORE_DIR, 0o700)
+    os.chmod(SBATCH_DIR, 0o700)
 
 
 def _load() -> dict:
@@ -40,6 +42,7 @@ def _save(data: dict):
     tmp = STORE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
+    os.chmod(tmp, 0o600)
     os.replace(tmp, STORE)
 
 
@@ -109,4 +112,5 @@ def write_sbatch_file(draft: dict) -> str:
     path = os.path.join(SBATCH_DIR, f"draft-{draft['id']}.sbatch")
     with open(path, "w") as f:
         f.write(sbatch.render(draft))
+    os.chmod(path, 0o600)
     return path

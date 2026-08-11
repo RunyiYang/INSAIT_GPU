@@ -1,86 +1,95 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="A live Slurm GPU cluster dashboard and job control plane.">
+<meta name="theme-color" content="#090b12">
+<meta name="color-scheme" content="dark">
 <title>GPU Visualizer</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header>
-  <div class="brand">⬢ GPU&nbsp;Visualizer</div>
+<header class="app-header">
+  <a class="brand" href="/" aria-label="GPU Visualizer home">
+    <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="brand-copy"><strong>GPU Visualizer</strong><small>Cluster control plane</small></span>
+  </a>
   <div class="head-stats" id="headStats"></div>
   <div class="head-right">
-    <select id="refreshSel" title="刷新间隔">
+    <div class="live-status" id="connectionStatus" data-state="loading" role="status" aria-live="polite">
+      <span class="status-dot" aria-hidden="true"></span><span id="statusLabel">Connecting</span>
+    </div>
+    <label class="refresh-control"><span class="sr-only">自动刷新间隔</span><select id="refreshSel" title="自动刷新间隔">
       <option value="2000">2s</option>
       <option value="5000" selected>5s</option>
       <option value="10000">10s</option>
       <option value="30000">30s</option>
       <option value="0">off</option>
-    </select>
-    <span id="updated" class="updated">—</span>
-    <button id="refreshBtn" class="btn ghost" title="refresh now">↻</button>
+    </select></label>
+    <span id="updated" class="updated" aria-label="上次刷新时间">—</span>
+    <button type="button" id="refreshBtn" class="btn ghost icon-btn" title="立即刷新" aria-label="立即刷新"><span aria-hidden="true">↻</span></button>
   </div>
 </header>
 
-<div id="banner" class="banner hidden"></div>
-<div id="migBar" class="migbar hidden"></div>
+<div id="banner" class="banner hidden" role="alert" aria-live="assertive"></div>
+<div id="migBar" class="migbar hidden" aria-live="polite"></div>
 
-<main>
-  <section class="col cluster">
+<main id="appMain">
+  <section class="col cluster" aria-labelledby="clusterTitle">
     <div class="col-head">
-      <h2>Cluster GPUs</h2>
-      <div class="filters">
+      <div class="section-title"><span class="eyebrow">Live overview</span><h1 id="clusterTitle">Cluster GPUs</h1></div>
+      <div class="filters" aria-label="节点筛选">
         <label class="chk"><input type="checkbox" id="onlyFree"> free only</label>
         <label class="chk"><input type="checkbox" id="onlyMine"> mine only</label>
-        <select id="typeFilter"><option value="">all types</option></select>
+        <label><span class="sr-only">GPU 类型</span><select id="typeFilter"><option value="">all types</option></select></label>
       </div>
     </div>
-    <div id="clusterBody" class="cluster-body">loading…</div>
+    <div id="clusterBody" class="cluster-body" aria-live="polite"><div class="loading-state"><span class="spinner" aria-hidden="true"></span>Loading cluster…</div></div>
   </section>
 
-  <div id="dragbar" class="dragbar" title="拖动调整宽度(双击复位)"></div>
+  <div id="dragbar" class="dragbar" role="separator" aria-orientation="vertical" aria-label="调整工作面板宽度" tabindex="0" title="拖动调整宽度，双击复位"></div>
 
-  <aside class="col side">
-    <div class="tabs">
-      <button class="tab active" data-tab="projects">Projects <span id="projCount" class="pill"></span></button>
-      <button class="tab" data-tab="jobs">Jobs <span id="jobsCount" class="pill"></span></button>
-      <button class="tab" data-tab="queue">Queue <span id="queueCount" class="pill"></span></button>
-      <button class="tab" data-tab="migrations">Migrations <span id="migCount" class="pill"></span></button>
-      <button class="tab" data-tab="drafts">Ad-hoc <span id="draftsCount" class="pill"></span></button>
+  <aside class="col side" aria-label="工作区">
+    <div class="tabs" role="tablist" aria-label="工作区视图">
+      <button type="button" id="tabBtn-projects" class="tab active" role="tab" aria-selected="true" aria-controls="tab-projects" data-tab="projects">Projects <span id="projCount" class="pill"></span></button>
+      <button type="button" id="tabBtn-jobs" class="tab" role="tab" aria-selected="false" aria-controls="tab-jobs" tabindex="-1" data-tab="jobs">Jobs <span id="jobsCount" class="pill"></span></button>
+      <button type="button" id="tabBtn-queue" class="tab" role="tab" aria-selected="false" aria-controls="tab-queue" tabindex="-1" data-tab="queue">Queue <span id="queueCount" class="pill"></span></button>
+      <button type="button" id="tabBtn-migrations" class="tab" role="tab" aria-selected="false" aria-controls="tab-migrations" tabindex="-1" data-tab="migrations">Activity <span id="migCount" class="pill"></span></button>
+      <button type="button" id="tabBtn-drafts" class="tab" role="tab" aria-selected="false" aria-controls="tab-drafts" tabindex="-1" data-tab="drafts">Ad-hoc <span id="draftsCount" class="pill"></span></button>
     </div>
 
-    <div id="tab-projects" class="tab-body">
+    <div id="tab-projects" class="tab-body" role="tabpanel" aria-labelledby="tabBtn-projects" tabindex="0">
       <div class="addrow">
-        <input id="projPath" placeholder="项目 repo 绝对路径 (含 gpuviz.toml)">
-        <button class="btn" id="addProjBtn">+ Add</button>
+        <label class="grow"><span class="sr-only">项目 repo 绝对路径</span><input id="projPath" autocomplete="off" placeholder="项目 repo 绝对路径 (含 gpuviz.toml)"></label>
+        <button type="button" class="btn" id="addProjBtn">+ Add</button>
       </div>
       <p class="hint">在每个 repo 根目录放 <code>gpuviz.toml</code> 声明任务;这里统一提交/管理。提交时可临时改参数,真实 sbatch 会快照进 repo 的 <code>.gpuviz/submissions/</code>。</p>
       <div id="projectsBody"></div>
     </div>
 
-    <div id="tab-jobs" class="tab-body hidden"><div id="jobsBody">loading…</div></div>
+    <div id="tab-jobs" class="tab-body hidden" role="tabpanel" aria-labelledby="tabBtn-jobs" tabindex="0"><div id="jobsBody">loading…</div></div>
 
-    <div id="tab-queue" class="tab-body hidden">
+    <div id="tab-queue" class="tab-body hidden" role="tabpanel" aria-labelledby="tabBtn-queue" tabindex="0">
       <div class="addrow">
-        <div id="queueSummary" class="hint" style="flex:1"></div>
+        <div id="queueSummary" class="hint grow"></div>
         <label class="chk"><input type="checkbox" id="queueMine"> 只看我的</label>
-        <select id="queueType"><option value="">all GPU</option></select>
+        <label><span class="sr-only">队列 GPU 类型</span><select id="queueType"><option value="">all GPU</option></select></label>
       </div>
-      <p class="hint">全集群 PENDING 队列,按调度优先级排序(挂起/依赖的沉底)。条形=优先级分解:<i class="lg" style="background:#7c5cff"></i>nice <i class="lg" style="background:#4f9cf9"></i>age <i class="lg" style="background:#2ecc71"></i>fair <i class="lg" style="background:#f5a623"></i>qos。</p>
+      <p class="hint">全集群 PENDING 队列，按调度优先级排序（挂起/依赖的沉底）。条形=优先级分解:<i class="lg legend-nice"></i>nice <i class="lg legend-age"></i>age <i class="lg legend-fair"></i>fair <i class="lg legend-qos"></i>qos。</p>
       <div id="queueBody"></div>
     </div>
 
-    <div id="tab-migrations" class="tab-body hidden">
-      <div class="addrow"><div class="hint" style="flex:1">make-before-break:新任务 RUNNING 后才取消旧的。把 Jobs 里的任务拖到左边空闲节点即可发起。</div>
-        <button class="btn ghost sm" id="clearMigBtn">clear done</button></div>
+    <div id="tab-migrations" class="tab-body hidden" role="tabpanel" aria-labelledby="tabBtn-migrations" tabindex="0">
+      <div class="addrow"><div class="hint grow">make-before-break:新任务 RUNNING 后才取消旧的。拖动任务或使用 move… 选择空闲节点即可发起。</div>
+        <button type="button" class="btn ghost sm" id="clearMigBtn">clear done</button></div>
       <div id="migrationsBody"></div>
     </div>
 
-    <div id="tab-drafts" class="tab-body hidden">
+    <div id="tab-drafts" class="tab-body hidden" role="tabpanel" aria-labelledby="tabBtn-drafts" tabindex="0">
       <div class="addrow">
-        <button class="btn" id="newDraftBtn">+ New</button>
-        <button class="btn ghost" id="newHolderBtn" title="占卡空转,之后可替换成 eval">+ Holder</button>
+        <button type="button" class="btn" id="newDraftBtn">+ New</button>
+        <button type="button" class="btn ghost" id="newHolderBtn" title="占卡空转，之后可替换成 eval">+ Holder</button>
       </div>
       <p class="hint">不挂靠 repo 的一次性任务。拖到左边空闲节点可锁定 --nodelist。</p>
       <div id="draftsBody"></div>
@@ -89,53 +98,53 @@
 </main>
 
 <!-- catalog submit / override modal -->
-<div id="subModal" class="modal hidden">
-  <div class="modal-card">
+<div id="subModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="subTitle">
+  <div class="modal-card" tabindex="-1">
     <div class="modal-head"><h3 id="subTitle">Submit job</h3>
-      <button class="btn ghost" id="subClose">✕</button></div>
+      <button type="button" class="btn ghost icon-btn" id="subClose" aria-label="关闭提交窗口">✕</button></div>
     <div class="modal-body">
-      <form id="subForm" class="form"></form>
+      <form id="subForm" class="form" autocomplete="off"></form>
       <div class="preview">
         <div class="preview-head">sbatch 预览 <span class="muted" id="subPrevStatus"></span></div>
         <pre id="subPrev" class="preview-pre"></pre>
       </div>
     </div>
     <div class="modal-foot">
-      <button class="btn ghost sm" id="maxSchedBtn" title="清 nodelist+任意卡型+多分区,最快被调度">⚡ max schedulability</button>
+      <button type="button" class="btn ghost sm" id="maxSchedBtn" title="清 nodelist + 任意卡型 + 多分区，最快被调度">⚡ max schedulability</button>
       <span id="subErr" class="err"></span><div class="spacer"></div>
-      <button class="btn ghost" id="subCancel">Cancel</button>
-      <button class="btn primary" id="subSubmit">Submit to Slurm</button>
+      <button type="button" class="btn ghost" id="subCancel">Cancel</button>
+      <button type="button" class="btn primary" id="subSubmit">Submit to Slurm</button>
     </div>
   </div>
 </div>
 
 <!-- ad-hoc draft editor modal -->
-<div id="modal" class="modal hidden">
-  <div class="modal-card">
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <div class="modal-card" tabindex="-1">
     <div class="modal-head"><h3 id="modalTitle">Edit job</h3>
-      <button class="btn ghost" id="modalClose">✕</button></div>
+      <button type="button" class="btn ghost icon-btn" id="modalClose" aria-label="关闭任务编辑窗口">✕</button></div>
     <div class="modal-body">
-      <form id="draftForm" class="form"></form>
+      <form id="draftForm" class="form" autocomplete="off"></form>
       <div class="preview">
         <div class="preview-head">sbatch 预览 <span class="muted" id="previewStatus"></span></div>
         <pre id="previewPre" class="preview-pre"></pre>
       </div>
     </div>
     <div class="modal-foot"><span id="modalErr" class="err"></span><div class="spacer"></div>
-      <button class="btn ghost" id="modalCancel">Cancel</button>
-      <button class="btn" id="modalSave">Save</button>
-      <button class="btn primary" id="modalSubmit">Save &amp; Submit</button></div>
+      <button type="button" class="btn ghost" id="modalCancel">Cancel</button>
+      <button type="button" class="btn" id="modalSave">Save</button>
+      <button type="button" class="btn primary" id="modalSubmit">Save &amp; Submit</button></div>
   </div>
 </div>
 
 <!-- node zoom-in modal -->
-<div id="nodeModal" class="modal hidden">
-  <div class="modal-card nodecard">
+<div id="nodeModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="nodeTitle">
+  <div class="modal-card nodecard" tabindex="-1">
     <div class="modal-head">
       <h3 id="nodeTitle">node</h3>
       <span id="nodeTags"></span>
-      <span class="muted" id="nodeLive" style="margin-left:auto;font-size:11px"></span>
-      <button class="btn ghost" id="nodeClose">✕</button>
+      <span class="muted node-live" id="nodeLive"></span>
+      <button type="button" class="btn ghost icon-btn" id="nodeClose" aria-label="关闭节点详情">✕</button>
     </div>
     <div class="node-detail">
       <div id="nodeInfo" class="node-info"></div>
@@ -147,23 +156,25 @@
 </div>
 
 <!-- log viewer modal -->
-<div id="logModal" class="modal hidden">
-  <div class="modal-card big">
+<div id="logModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="logTitle">
+  <div class="modal-card big" tabindex="-1">
     <div class="modal-head">
       <h3 id="logTitle">Logs</h3>
       <div class="logtabs">
-        <button class="ltab active" data-stream="out">stdout</button>
-        <button class="ltab" data-stream="err">stderr</button>
+        <button type="button" class="ltab active" data-stream="out">stdout</button>
+        <button type="button" class="ltab" data-stream="err">stderr</button>
       </div>
       <label class="auto"><input type="checkbox" id="logFollow" checked> follow</label>
-      <button class="btn ghost" id="logClose">✕</button>
+      <button type="button" class="btn ghost icon-btn" id="logClose" aria-label="关闭日志窗口">✕</button>
     </div>
     <div class="logmeta" id="logMeta"></div>
     <pre id="logPre" class="logpre"></pre>
   </div>
 </div>
 
-<div id="tip" class="tip hidden"></div>
-<script src="/static/app.js"></script>
+<div id="tip" class="tip hidden" role="tooltip"></div>
+<div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+<noscript><div class="banner">GPU Visualizer requires JavaScript.</div></noscript>
+<script src="/static/app.js" defer></script>
 </body>
 </html>

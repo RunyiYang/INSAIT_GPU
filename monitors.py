@@ -62,7 +62,7 @@ def upsert(d: dict, when: float | None = None) -> dict:
     return rec
 
 
-def _read_files(now: float) -> dict:
+def _read_files() -> dict:
     out = {}
     try:
         names = os.listdir(DIR)
@@ -90,7 +90,7 @@ def list_monitors() -> list[dict]:
     with _lock:
         for k, v in _mem.items():
             merged[k] = dict(v)
-    for k, v in _read_files(now).items():
+    for k, v in _read_files().items():
         if k not in merged or v["updated"] >= merged[k]["updated"]:
             merged[k] = v
     out = []
@@ -124,7 +124,7 @@ def clear_finished() -> int:
         for k in [k for k, v in _mem.items() if v.get("status") in ("done", "failed")]:
             del _mem[k]
             n += 1
-    for rec in _read_files(time.time()).values():
+    for rec in _read_files().values():
         if rec.get("status") in ("done", "failed"):
             try:
                 os.remove(os.path.join(DIR, f"{rec['key']}.json"))

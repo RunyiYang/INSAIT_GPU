@@ -1,0 +1,31 @@
+[Unit]
+Description=GPU Visualizer Slurm control plane
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=@@REPO_DIR@@
+ExecStart=@@PYTHON@@ @@REPO_DIR@@/server.py --socket=%t/gpuviz/gpuviz.sock
+Restart=always
+RestartSec=5s
+TimeoutStopSec=20s
+KillMode=control-group
+RuntimeDirectory=gpuviz
+RuntimeDirectoryMode=0700
+UMask=0077
+Environment=HOME=%h
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=default.target

@@ -14,10 +14,6 @@ _PASS = ("name", "gpus", "gpu_type", "nodes", "cpus", "mem", "time", "partition"
          "qos", "account", "nodelist", "exclude", "array", "open_mode", "output")
 
 
-class CatalogError(RuntimeError):
-    pass
-
-
 def config_path(repo: str) -> str | None:
     for cand in ("gpuviz.toml", os.path.join(".gpuviz", "jobs.toml")):
         p = os.path.join(repo, cand)

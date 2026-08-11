@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import threading
 from datetime import datetime
 
-import catalog
 import logs
 import sbatch
 import slurm
@@ -32,7 +32,8 @@ OVERRIDE_FIELDS = ("name", "gpus", "gpu_type", "nodes", "cpus", "mem", "time",
 
 # ---- central submission index ---------------------------------------------
 def _load() -> dict:
-    os.makedirs(STORE_DIR, exist_ok=True)
+    os.makedirs(STORE_DIR, mode=0o700, exist_ok=True)
+    os.chmod(STORE_DIR, 0o700)
     if not os.path.exists(INDEX):
         return {"seq": 0, "items": []}
     try:
@@ -46,6 +47,7 @@ def _save(data: dict):
     tmp = INDEX + ".tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
+    os.chmod(tmp, 0o600)
     os.replace(tmp, INDEX)
 
 
@@ -108,8 +110,7 @@ def _override_args(d: dict) -> list[str]:
                     ("exclude", "--exclude"), ("array", "--array")):
         v = d.get(k)
         if v not in (None, "", "0") or (k in ("cpus", "nodes") and v):
-            if v not in (None, ""):
-                args.append(f"{flag}={v}")
+            args.append(f"{flag}={v}")
     return args
 
 
@@ -123,9 +124,10 @@ def submit_spec(project: dict, spec: dict, overrides: dict | None = None) -> dic
 
     snap_dir = os.path.join(repo, ".gpuviz", "submissions")
     os.makedirs(snap_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     key = merged.get("key") or merged.get("name") or "job"
-    snap = os.path.join(snap_dir, f"{key}-{ts}.sbatch")
+    file_key = re.sub(r"[^A-Za-z0-9._-]+", "-", str(key)).strip(".-")[:80] or "job"
+    snap = os.path.join(snap_dir, f"{file_key}-{ts}.sbatch")
 
     extra = []
     if spec.get("script_file"):
@@ -139,6 +141,7 @@ def submit_spec(project: dict, spec: dict, overrides: dict | None = None) -> dic
     else:
         with open(snap, "w") as f:
             f.write(sbatch.render(merged))
+    os.chmod(snap, 0o600)
 
     # ensure the --output directory exists (else sbatch rejects the job)
     outdir = sbatch.required_output_dir(merged)
@@ -149,7 +152,7 @@ def submit_spec(project: dict, spec: dict, overrides: dict | None = None) -> dic
     job_id = slurm.submit(snap, extra_args=extra, workdir=repo)
 
     # rename snapshot to embed the job id, then resolve log paths
-    final = os.path.join(snap_dir, f"{key}-{ts}-job{job_id}.sbatch")
+    final = os.path.join(snap_dir, f"{file_key}-{ts}-job{job_id}.sbatch")
     try:
         os.replace(snap, final)
     except OSError:

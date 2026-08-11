@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 from getpass import getuser
 
@@ -40,20 +41,47 @@ def _run(cmd: list[str], timeout: int = 20, cwd: str | None = None) -> str:
 
 # tiny TTL cache so repeated polls within a window reuse one slurm call
 _cache: dict[str, tuple[float, object]] = {}
+_cache_lock = threading.Lock()
+_cache_inflight: dict[str, threading.Event] = {}
+_cache_generation = 0
 
 
 def _cached(key: str, ttl: float, fn):
-    now = time.monotonic()
-    hit = _cache.get(key)
-    if hit and now - hit[0] < ttl:
-        return hit[1]
-    val = fn()
-    _cache[key] = (now, val)
+    # Coalesce concurrent dashboard polls so several tabs do not stampede the
+    # Slurm controller with the same expensive query.
+    while True:
+        now = time.monotonic()
+        with _cache_lock:
+            hit = _cache.get(key)
+            if hit and now - hit[0] < ttl:
+                return hit[1]
+            pending = _cache_inflight.get(key)
+            if pending is None:
+                pending = threading.Event()
+                _cache_inflight[key] = pending
+                generation = _cache_generation
+                break
+        pending.wait()
+    try:
+        val = fn()
+    except BaseException:
+        with _cache_lock:
+            _cache_inflight.pop(key, None)
+            pending.set()
+        raise
+    with _cache_lock:
+        if generation == _cache_generation:
+            _cache[key] = (time.monotonic(), val)
+        _cache_inflight.pop(key, None)
+        pending.set()
     return val
 
 
 def invalidate():
-    _cache.clear()
+    global _cache_generation
+    with _cache_lock:
+        _cache_generation += 1
+        _cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +105,7 @@ def _parse_gres_gpus(gres: str | None) -> dict[str, int]:
 def _parse_tres_gpu(tres: str | None) -> tuple[int, str | None]:
     """Return (total gpu count, gpu type or None) from a tres string."""
     if not tres:
-        return 0, 0 and None or None
+        return 0, None
     total = 0
     gtype = None
     for typ, n in _TRES_GPU_RE.findall(tres):
@@ -592,21 +620,9 @@ def update(job_id: str, **fields) -> None:
 
 def job_state(job_id: str) -> str | None:
     """Quick single-job state lookup (used by migration watchers)."""
-    try:
-        out = _run(["squeue", "-j", str(job_id), "-h", "-o", "%T"], timeout=15)
-    except SlurmError:
-        return None
+    out = _run(["squeue", "-j", str(job_id), "-h", "-o", "%T"], timeout=15)
     s = out.strip().splitlines()
     return s[0].strip() if s else None
-
-
-def node_of(job_id: str) -> str | None:
-    try:
-        out = _run(["squeue", "-j", str(job_id), "-h", "-o", "%N"], timeout=15)
-    except SlurmError:
-        return None
-    n = out.strip().splitlines()
-    return n[0].strip() if n and n[0].strip() else None
 
 
 # ---------------------------------------------------------------------------

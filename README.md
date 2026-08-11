@@ -13,15 +13,32 @@ node/npm, no build step.
 On the Slurm **login node**:
 
 ```bash
-python3 server.py --port 8770
+gpuviz_runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+python3 server.py --socket="${gpuviz_runtime}/gpuviz-manual.sock"
 ```
 
 From your laptop:
 
 ```bash
-ssh -L 8770:localhost:8770 <login-node>      # e.g. sof1-h200-0
+ssh -L 8770:/run/user/<UID>/gpuviz-manual.sock <login-node>
 # open http://localhost:8770
 ```
+
+Find `<UID>` with `id -u` on the login node. The Unix socket is mode `0600`, so
+other users on the shared host cannot call the unauthenticated control API.
+TCP mode requires an explicit `--host`; do not use it on a shared login node
+without a separate authentication boundary.
+
+## Cloudflare production deployment
+
+This app cannot run on Pages or Workers: the backend must stay beside Slurm so
+it can execute cluster commands and read project/log files. The supported online
+shape is a named Cloudflare Tunnel protected by Cloudflare Access, pointing to a
+mode-`0600` Unix socket owned by the Slurm user.
+
+See [`deploy/cloudflare/README.md`](deploy/cloudflare/README.md) for the pinned
+connector install, systemd user units, Access-first rollout, and verification
+steps. Never expose this app without Access; it can submit and cancel jobs.
 
 ## Concept
 
@@ -85,23 +102,28 @@ See [`examples/gpuviz.toml`](examples/gpuviz.toml). Supports `[defaults]` +
 | `catalog.py`   | read a repo's `gpuviz.toml` |
 | `projects.py`  | repo registry (`~/.gpuviz/projects.json`) |
 | `submitter.py` | render + snapshot + submit + provenance index |
-| `migrate.py`   | make-before-break background engine |
+| `migrate.py`   | durable make-before-break background engine |
 | `deps.py`      | data-dependency presence checks |
 | `logs.py`      | resolve + tail stdout/stderr |
 | `sbatch.py`    | render spec → sbatch; field help; holder template |
 | `drafts.py`    | ad-hoc (non-repo) jobs |
 | `static/`      | `index.html`, `style.css`, `app.js` (no build) |
 
-## Not done yet
+## Operational notes
 
-- **Cross-site data transfer** (feature 7): deps already *detect* `site=` data
-  that lives on another cluster (sof1/msp3/hala/gcp don't share `/scratch`, and
-  `/group` is Ceph) and flag ⇄ "stage first" — but the actual transfer + progress
-  bar isn't built. Needs the storage topology confirmed (is `/group` the same
-  Ceph everywhere?) and a transfer mechanism (rsync between login nodes? object
-  store?).
+- **Cross-site data transfer is experimental.** The current implementation uses
+  rsync over SSH and reports progress, but it still depends on the confirmed
+  storage topology, host keys, and site-to-site login policy.
 - Live submit/migrate were left **untested against real jobs** by design; do a
   guarded end-to-end run with a tiny holder job first.
 
-State lives in `~/.gpuviz/` (projects, drafts, submission index). Migrations are
-in-memory (lost on server restart).
+State lives in `~/.gpuviz/` (projects, drafts, submission index, and migration
+journal). Waiting make-before-break migrations are reconciled after a server
+restart.
+
+## Verification
+
+```bash
+python3 -m unittest discover -s tests -v
+deno check static/app.js  # optional JS syntax check when Deno is available
+```

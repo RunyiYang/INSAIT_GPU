@@ -17,7 +17,8 @@ _lock = threading.Lock()
 
 
 def _load() -> dict:
-    os.makedirs(STORE_DIR, exist_ok=True)
+    os.makedirs(STORE_DIR, mode=0o700, exist_ok=True)
+    os.chmod(STORE_DIR, 0o700)
     if not os.path.exists(STORE):
         return {"seq": 0, "items": []}
     try:
@@ -28,10 +29,12 @@ def _load() -> dict:
 
 
 def _save(data: dict):
-    os.makedirs(STORE_DIR, exist_ok=True)
+    os.makedirs(STORE_DIR, mode=0o700, exist_ok=True)
+    os.chmod(STORE_DIR, 0o700)
     tmp = STORE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
+    os.chmod(tmp, 0o600)
     os.replace(tmp, STORE)
 
 

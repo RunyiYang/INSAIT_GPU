@@ -1,0 +1,26 @@
+[Unit]
+Description=Cloudflare Tunnel for GPU Visualizer
+After=network-online.target gpuviz.service
+Wants=network-online.target gpuviz.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+ExecStart=@@CLOUDFLARED@@ tunnel --no-autoupdate --metrics 127.0.0.1:0 run --token-file @@TOKEN_FILE@@
+Restart=always
+RestartSec=5s
+TimeoutStartSec=0
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=default.target
