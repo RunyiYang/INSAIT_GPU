@@ -7,7 +7,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory=@@REPO_DIR@@
-ExecStart=@@PYTHON@@ @@REPO_DIR@@/server.py --socket=%t/gpuviz/gpuviz.sock
+ExecStart=@@PYTHON@@ @@REPO_DIR@@/server.py @@LISTEN_ARGS@@ --auth-token-file=@@AUTH_TOKEN_FILE@@
 Restart=always
 RestartSec=5s
 TimeoutStopSec=20s

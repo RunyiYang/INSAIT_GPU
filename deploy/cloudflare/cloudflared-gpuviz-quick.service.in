@@ -1,0 +1,28 @@
+[Unit]
+Description=Temporary Cloudflare Quick Tunnel for GPU Visualizer
+Requires=gpuviz-quick-proxy.socket
+After=network-online.target gpuviz.service gpuviz-quick-proxy.socket
+BindsTo=gpuviz-quick-proxy.socket
+Wants=network-online.target gpuviz.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+ExecStart=@@CLOUDFLARED@@ tunnel --config=/dev/null --no-autoupdate --loglevel=info --management-diagnostics=false --metrics=127.0.0.1:0 --url=http://127.0.0.1:18770
+Restart=always
+RestartSec=5s
+TimeoutStartSec=0
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=default.target

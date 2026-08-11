@@ -1,0 +1,10 @@
+[Unit]
+Description=Loopback socket for the GPU Visualizer Quick Tunnel proxy
+
+[Socket]
+ListenStream=127.0.0.1:18770
+Accept=no
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

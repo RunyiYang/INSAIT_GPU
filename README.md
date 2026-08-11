@@ -34,11 +34,13 @@ without a separate authentication boundary.
 This app cannot run on Pages or Workers: the backend must stay beside Slurm so
 it can execute cluster commands and read project/log files. The supported online
 shape is a named Cloudflare Tunnel protected by Cloudflare Access, pointing to a
-mode-`0600` Unix socket owned by the Slurm user.
+mode-`0600` Unix socket owned by the Slurm user. A password-protected,
+random-URL Quick Tunnel is available as a no-sudo development fallback only.
 
 See [`deploy/cloudflare/README.md`](deploy/cloudflare/README.md) for the pinned
-connector install, systemd user units, Access-first rollout, and verification
-steps. Never expose this app without Access; it can submit and cancel jobs.
+connector install, systemd user units, Access-first production rollout,
+temporary Quick Tunnel limitations, and verification steps. The installer also
+enables mandatory app authentication; this UI can submit and cancel jobs.
 
 ## Concept
 

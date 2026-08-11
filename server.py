@@ -12,6 +12,9 @@ done here. Pure stdlib; the frontend polls the JSON API.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import hmac
 import json
 import math
 import os
@@ -39,6 +42,41 @@ import transfer
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.realpath(os.path.join(HERE, "static"))
 MAX_BODY_BYTES = 1024 * 1024
+AUTH_USER = b"gpuviz"
+AUTH_MIN_TOKEN_CHARS = 32
+
+
+def load_auth_token(path: str) -> bytes:
+    """Load a private Basic-auth token without following symlinks."""
+    path = os.path.abspath(os.path.expanduser(path))
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as e:
+        raise ValueError(f"cannot open auth token file {path}: {e.strerror or e}") from e
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("auth token file must be a regular file")
+        if info.st_uid != os.getuid():
+            raise ValueError("auth token file must be owned by the current user")
+        mode = stat.S_IMODE(info.st_mode)
+        if mode != 0o600:
+            raise ValueError("auth token file must have mode 0600")
+        with os.fdopen(fd, "rb") as f:
+            fd = -1
+            raw = f.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    token = raw.strip()
+    try:
+        token_text = token.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ValueError("auth token file must contain UTF-8 text") from e
+    if len(token_text) < AUTH_MIN_TOKEN_CHARS:
+        raise ValueError(f"auth token must contain at least {AUTH_MIN_TOKEN_CHARS} characters")
+    return token
 
 
 class RequestError(Exception):
@@ -49,11 +87,13 @@ class RequestError(Exception):
 
 class GpuvizHTTPServer(ThreadingHTTPServer):
     request_queue_size = 64
+    auth_token: bytes | None = None
 
 
 class GpuvizUnixHTTPServer(ThreadingMixIn, UnixStreamServer):
     daemon_threads = True
     request_queue_size = 64
+    auth_token: bytes | None = None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -136,6 +176,53 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        if self._forwarded_proto() == "https":
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
+
+    def _forwarded_proto(self) -> str | None:
+        value = self.headers.get("X-Forwarded-Proto")
+        return None if value is None else value.split(",", 1)[0].strip().lower()
+
+    def _auth_error(self, status: int, message: str, challenge: bool = False) -> bool:
+        body = json.dumps({"error": message}, separators=(",", ":")).encode()
+        self.close_connection = True
+        self.send_response(status)
+        if challenge:
+            self.send_header("WWW-Authenticate", 'Basic realm="GPU Visualizer", charset="UTF-8"')
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self._security_headers()
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+        return False
+
+    def _require_auth(self) -> bool:
+        expected = self.server.auth_token
+        if expected is None:
+            return True
+        forwarded_proto = self._forwarded_proto()
+        if forwarded_proto is not None and forwarded_proto != "https":
+            return self._auth_error(403, "HTTPS is required for Basic authentication")
+        supplied_user = b""
+        supplied_token = b""
+        header = self.headers.get("Authorization", "")
+        parts = header.split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "basic":
+            try:
+                decoded = base64.b64decode(parts[1], validate=True)
+            except (binascii.Error, ValueError):
+                decoded = b""
+            supplied_user, separator, supplied_token = decoded.partition(b":")
+        else:
+            separator = b""
+        user_matches = hmac.compare_digest(supplied_user, AUTH_USER)
+        token_matches = hmac.compare_digest(supplied_token, expected)
+        if separator and user_matches and token_matches:
+            return True
+        return self._auth_error(401, "authentication required", challenge=True)
 
     def _body(self) -> dict:
         if self.headers.get("Transfer-Encoding"):
@@ -181,7 +268,8 @@ class Handler(BaseHTTPRequestHandler):
         result = (self._delete(path, q or {}) if self.command == "DELETE"
                   else self._post(path, self._body()))
         if path not in ("/api/preview", "/api/monitors") and not path.endswith("/preview"):
-            actor = (self.headers.get("Cf-Access-Authenticated-User-Email") or "local")[:200]
+            actor = ("basic:gpuviz" if self.server.auth_token is not None else
+                     (self.headers.get("Cf-Access-Authenticated-User-Email") or "local")[:200])
             print(json.dumps({"event": "mutation", "actor": actor,
                               "method": self.command, "path": path}), flush=True)
         return result
@@ -206,6 +294,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- GET --------------------------------------------------------------
     def do_GET(self):
+        if not self._require_auth():
+            return None
         u = urlparse(self.path)
         path, q = unquote(u.path), parse_qs(u.query)
         if path in ("/", "/index.html"):
@@ -216,6 +306,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._wrap(lambda: self._get(path, q))
 
     def do_HEAD(self):
+        if not self._require_auth():
+            return None
         path = unquote(urlparse(self.path).path)
         if path in ("/", "/index.html"):
             return self._file(os.path.join(STATIC, "index.html"), head_only=True)
@@ -333,6 +425,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- DELETE -----------------------------------------------------------
     def do_DELETE(self):
+        if not self._require_auth():
+            return None
         u = urlparse(self.path)
         return self._wrap(lambda: self._mutate(unquote(u.path), parse_qs(u.query)))
 
@@ -357,6 +451,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- POST / PUT -------------------------------------------------------
     def do_POST(self):
+        if not self._require_auth():
+            return None
         path = unquote(urlparse(self.path).path)
         return self._wrap(lambda: self._mutate(path))
 
@@ -527,6 +623,10 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8770)
+    ap.add_argument(
+        "--auth-token-file",
+        help="enable HTTP Basic auth with a current-user-owned mode-0600 token file",
+    )
     listen = ap.add_mutually_exclusive_group(required=True)
     listen.add_argument(
         "--host",
@@ -534,6 +634,10 @@ def main():
     )
     listen.add_argument("--socket", help="serve on a mode-0600 Unix socket (recommended)")
     args = ap.parse_args()
+    try:
+        auth_token = load_auth_token(args.auth_token_file) if args.auth_token_file else None
+    except ValueError as e:
+        ap.error(str(e))
     socket_path = None
     if args.socket:
         socket_path = os.path.abspath(os.path.expanduser(args.socket))
@@ -559,6 +663,7 @@ def main():
         os.chmod(socket_path, 0o600)
     else:
         httpd = GpuvizHTTPServer((args.host, args.port), Handler)
+    httpd.auth_token = auth_token
     print(f"gpu-visualizer — user '{slurm.USER}' @ site '{slurm.current_site()}'")
     if socket_path:
         print(f"  socket: {socket_path} (mode 0600)")

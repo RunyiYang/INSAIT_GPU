@@ -1,0 +1,20 @@
+[Unit]
+Description=Proxy the GPU Visualizer Quick Tunnel to its private Unix socket
+Requires=gpuviz-quick-proxy.socket
+After=gpuviz.service gpuviz-quick-proxy.socket
+BindsTo=gpuviz-quick-proxy.socket
+Wants=gpuviz.service
+
+[Service]
+Type=notify
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --connections-max=64 %t/gpuviz/gpuviz.sock
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
